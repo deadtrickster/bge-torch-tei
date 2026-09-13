@@ -1,8 +1,11 @@
-# bge-torch-tei
+# TEI-compatible bge-m3 embeddings on AMD GPUs
 
-bge-m3 embedding server on AMD ROCm GPUs, speaking the TEI `/embed` protocol.
-A drop-in replacement for [text-embeddings-inference](https://github.com/huggingface/text-embeddings-inference)
-on consumer RDNA hardware.
+<p align="center"><img src="logo.svg" width="120" alt="bge-m3 on ROCm"/></p>
+
+TEI-compatible embedding server for [bge-m3](https://huggingface.co/BAAI/bge-m3)
+on AMD RDNA GPUs. Drop-in replacement for
+[text-embeddings-inference](https://github.com/huggingface/text-embeddings-inference)
+on hardware TEI doesn't support.
 
 ## Why
 
@@ -24,16 +27,12 @@ on the same GPU.
 | Radeon AI PRO R9700 | gfx1201 | llama.cpp HIP | ~44 |
 | Strix Halo 8060S iGPU | gfx1151 | **this** | **27.6** |
 | Strix Halo 8060S iGPU | gfx1151 | ollama | ~18 |
-| RTX 6000 Blackwell | CUDA | TEI | ~220 local / ~107 over LAN |
+| RTX 6000 Blackwell | CUDA | TEI | ~220 |
 
 On the R9700, torch is **3.7× llama.cpp** on the same silicon (llama.cpp's
-HIP path saturates at ~44 regardless of batch or flash attention).
-
-Vs RTX 6000 Blackwell: ~1.4× slower local-vs-local (162 vs 220), but wins
-as delivered — the RTX 6000 drops to ~107 through a LAN proxy while the
-R9700's 162 arrives intact. At ~10× lower price, roughly **7× the
-price/performance** for local embedding. Comparison holds for this workload
-shape only (single-model, batch-32, ~400-token chunks).
+HIP path saturates at ~44 regardless of batch or flash attention). ~1.4×
+slower than an RTX 6000, at roughly **10× lower price**. Comparison holds
+for this workload shape only (single-model, batch-32, ~400-token chunks).
 
 ## Setup
 

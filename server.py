@@ -1,23 +1,21 @@
 #!/usr/bin/env python3
-# bge-torch-tei: bge-m3 dense embedder on AMD ROCm GPUs, speaking the TEI
-# /embed protocol so the fanout can use it as a tei@ backend.
+# bge-m3 dense embedder on AMD ROCm GPUs, speaking the TEI /embed protocol.
 #
-# Measured 2026-09-13 on lubuntu3:
-#   R9700 (gfx1201): 162 chunks/s bench / 114-118 sustained (batch 32, bf16, SDPA)
-#   iGPU 8060S (gfx1151): 27.6 chunks/s (batch 32, bf16, SDPA)
-#   ollama (replaced): ~18 chunks/s
+# Measured (~400-token chunks, bf16, SDPA, batch 32):
+#   gfx1201 (Radeon AI PRO R9700): 162 chunks/s bench / 114 sustained
+#   gfx1151 (Strix Halo iGPU):     27.6 chunks/s
 #
 # GPU-specific requirements:
-#   gfx1151 (iGPU): MUST preload system ROCm 10 HSA runtime - the one bundled
+#   gfx1151: MUST preload system ROCm 10 HSA runtime - the one bundled
 #     in the torch rocm7.1 wheel null-derefs on gfx1151 at the first kernel
 #     launch (segfault at 0x34, libhsa-runtime64.so+0x5a70).
 #     Unit sets: LD_PRELOAD=/opt/rocm/lib/libhsa-runtime64.so
-#   gfx1201 (R9700): runs natively, no preload (it costs ~15% there).
+#   gfx1201: runs natively, no preload (it costs ~15% there).
 #
 # Environment:
 #   BGE_PORT      listen port (default 8110)
-#   BGE_MAX_BATCH merge ceiling (default 32; iGPU sweet spot - throughput
-#                 FALLS past it due to longest-chunk padding)
+#   BGE_MAX_BATCH merge ceiling (default 32; throughput FALLS past it
+#                 due to longest-chunk padding)
 #   BGE_BIND      bind address (default 127.0.0.1; set 0.0.0.0 to serve LAN)
 import json, os, queue, threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -63,9 +61,7 @@ def tokenizer_thread():
         # Merge only what fits WHOLE. The old take/put-back split path was a
         # count bug: a split request's handler did one rq.get() but received
         # two puts (first slice now, leftover slice later, never read), so the
-        # caller got a PARTIAL batch - RAGFlow's assert len(vects)==len(docs)
-        # caught it 88 times in 10 minutes once 32 executors made 1-chunk
-        # title embeds collide with 64-chunk content embeds constantly.
+        # caller got a PARTIAL batch - fewer vectors than inputs sent.
         while len(inputs) < MAX_BATCH:
             try:
                 item = work.get_nowait()
@@ -99,8 +95,8 @@ threading.Thread(target=gpu_worker, daemon=True).start()
 
 class H(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    # Default listen backlog is 5; a fanout with 12+ workers bursts past it
-    # and connections reset. (Caught by lubuntu2 during fleet bring-up.)
+    # Default listen backlog is 5; concurrent clients burst past it and
+    # connections reset.
     request_queue_size = 128
 
     def log_message(self, *a): pass

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-# bench_bge.py - bge-m3 dense embedding throughput bench on torch/ROCm.
-# Recreates the methodology from session 9c33af53: real ~400-token arXiv
-# chunks, bf16, SDPA, batches 32/64/128, CLS pooling, warm GPU, wall-clock
-# chunks/s. Original numbers (R9700 gfx1201, torch 2.13.0+rocm7.1):
-#   batch 32: 162  batch 64: 147  batch 128: 131
-# iGPU 8060S (gfx1151): batch 32: 27.6  batch 64: 23.5  batch 128: 22.4
+# bge-m3 dense embedding throughput bench on torch/ROCm.
+# Real ~400-token chunks, bf16, SDPA, batches 32/64/128, CLS pooling,
+# warm GPU, wall-clock chunks/s.
+# Reference (torch 2.13.0+rocm7.1):
+#   gfx1201 (R9700):    batch 32: 162  batch 64: 147  batch 128: 131
+#   gfx1151 (8060S):    batch 32: 27.6 batch 64: 23.5 batch 128: 22.4
 import sys, time, json, torch
 from transformers import AutoTokenizer, AutoModel
 
@@ -19,12 +19,13 @@ tok = AutoTokenizer.from_pretrained("BAAI/bge-m3")
 model = AutoModel.from_pretrained("BAAI/bge-m3", dtype=torch.bfloat16, attn_implementation="sdpa").to(dev).eval()
 print(f"loaded on {torch.cuda.get_device_name(idx)}  attn={model.config._attn_implementation}", flush=True)
 
-# build chunks from local corpus if available
-import glob
+# build chunks from local text files if available
+import glob, os
 text = ""
-for f in sorted(glob.glob("/mnt/data2/corpus/arxiv/*.txt")):
-    try: text += open(f, errors="ignore").read() + "\n\n"
-    except Exception: pass
+for pat in ("*.txt", os.path.expanduser("~/*.txt"), "/tmp/*.txt"):
+    for f in sorted(glob.glob(pat))[:20]:
+        try: text += open(f, errors="ignore").read() + "\n\n"
+        except Exception: pass
     if len(text) > 900000: break
 if text:
     chunks = [text[i:i+1500] for i in range(0, min(len(text), 1500*256), 1500)][:256]
