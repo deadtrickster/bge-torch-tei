@@ -1,93 +1,95 @@
 # bge-torch-tei
 
-bge-m3 dense embedder on AMD ROCm GPUs via PyTorch, speaking the TEI `/embed`
-protocol so it slots into an [embed-fanout](https://github.com/) pool as a
-`tei@` backend. Deployed on two Strix Halo boxes (lubuntu3 + lubuntu2) feeding
-a RAGFlow arXiv ingestion pipeline.
+bge-m3 embedding server on AMD ROCm GPUs, speaking the TEI `/embed` protocol.
+A drop-in replacement for [text-embeddings-inference](https://github.com/huggingface/text-embeddings-inference)
+on consumer RDNA hardware.
 
-## Measured throughput
+## Why
 
-| GPU | arch | chunks/s @ batch 32 | notes |
-|-----|------|--------------------:|-------|
-| R9700 (32GB, USB4 dock) | gfx1201 | 162 bench / 114 sustained | torch bf16+SDPA; batch 32 sweet spot (falls past it from padding) |
-| iGPU 8060S (Strix Halo) | gfx1151 | 27.6 | same config; GTT-backed |
-| ollama (replaced) | gfx1151 | ~18 | llama.cpp HIP path |
+[TEI](https://github.com/huggingface/text-embeddings-inference)'s
+[ROCm support](https://huggingface.co/docs/text-embeddings-inference/en/amd_gpu)
+is experimental and only tested on Instinct cards (MI200/MI300). On consumer
+RDNA (gfx1201, gfx1151) the candle backend never initializes; the Python
+fallback reduces to PyTorch behind the router anyway. This is that setup
+without the router — measured 114 ch/s direct vs 82 through the TEI router
+on the same GPU.
 
-## Requirements
+## Throughput
 
-- Python 3.12+ with `torch==2.13.0 --index-url https://download.pytorch.org/whl/rocm7.1`
-  and `transformers`
-- HF cache with `BAAI/bge-m3` (model + tokenizer)
-- Kernel amdgpu/KFD access (`/dev/kfd`)
+~400-token chunks, bf16, SDPA, batch 32:
 
-### GPU-specific notes
+| GPU | arch | engine | chunks/s |
+|-----|------|--------|---------:|
+| Radeon AI PRO R9700 | gfx1201 | **this** | **162** |
+| Radeon AI PRO R9700 | gfx1201 | llama.cpp HIP | ~44 |
+| Strix Halo 8060S iGPU | gfx1151 | **this** | **27.6** |
+| Strix Halo 8060S iGPU | gfx1151 | ollama | ~18 |
+| RTX 6000 Blackwell | CUDA | TEI | ~220 local / ~107 over LAN |
 
-- **gfx1151 (iGPU)**: the torch rocm7.1 wheel's bundled `libhsa-runtime64.so`
-  null-derefs on gfx1151 at the first kernel launch (segfault at 0x34,
-  `libhsa-runtime64.so+0x5a70`). You MUST preload the system ROCm 10 runtime:
-  ```
-  Environment=LD_PRELOAD=/opt/rocm/lib/libhsa-runtime64.so
-  ```
-- **gfx1201 (R9700)**: runs natively. Do NOT use the LD_PRELOAD there — it
-  costs ~15% throughput.
+On the R9700, torch is **3.7× llama.cpp** on the same silicon (llama.cpp's
+HIP path saturates at ~44 regardless of batch or flash attention).
+
+Vs RTX 6000 Blackwell: ~1.4× slower local-vs-local (162 vs 220), but wins
+as delivered — the RTX 6000 drops to ~107 through a LAN proxy while the
+R9700's 162 arrives intact. At ~10× lower price, roughly **7× the
+price/performance** for local embedding. Comparison holds for this workload
+shape only (single-model, batch-32, ~400-token chunks).
+
+## Setup
+
+```bash
+python3 -m venv venv
+./venv/bin/pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/rocm7.1
+./venv/bin/pip install transformers
+./venv/bin/python bench.py
+```
+
+## GPU notes
+
+**gfx1151 (Strix Halo / Phoenix APUs)**: the torch rocm7.1 wheel's bundled
+`libhsa-runtime64.so` segfaults at the first kernel launch (`segfault at
+0x34`, `libhsa-runtime64.so+0x5a70`). Preload the system ROCm runtime:
+
+```
+LD_PRELOAD=/opt/rocm/lib/libhsa-runtime64.so
+```
+
+`LD_LIBRARY_PATH` doesn't help — torch's RPATH wins.
+
+**gfx1201 (RDNA4 discrete)**: runs natively. Do **not** use the LD_PRELOAD
+above — it costs ~15% throughput.
 
 ## Server
 
 ```bash
-BGE_PORT=8110 BGE_BIND=0.0.0.0 python3 server.py
+BGE_PORT=8110 BGE_BIND=0.0.0.0 ./venv/bin/python3 server.py
 ```
 
-Endpoints:
-- `POST /embed` — `{"inputs": [...], "truncate": true}` → `[[...], ...]` (TEI protocol)
-- `GET /health` — `{"status":"ok"}` when model is loaded
+- `POST /embed` — `{"inputs": [...], "truncate": true}` → `[[...], ...]`
+- `GET /health` — `{"status":"ok"}`
 
-Environment: `BGE_PORT` (8110), `BGE_MAX_BATCH` (32), `BGE_BIND` (127.0.0.1).
+Env: `BGE_PORT` (8110), `BGE_MAX_BATCH` (32), `BGE_BIND` (127.0.0.1).
 
-Architecture: HTTP handler threads → work queue → tokenizer thread (merges
-whole requests up to `BGE_MAX_BATCH`, never splits) → GPU worker (pre-tokenized
-tensors only, so tokenization never idles the card).
+Architecture: HTTP threads → merge-whole-only batcher → tokenizer thread →
+GPU worker. Tokenization runs off the GPU's critical path. See `server.py`
+for why splitting batches was a bug.
 
-## Systemd units
-
-Two instances on a dual-GPU box:
-
-```ini
-# bge-torch.service (iGPU, port 8110)
-[Service]
-Environment=ROCR_VISIBLE_DEVICES=0
-Environment=BGE_PORT=8110
-Environment=LD_PRELOAD=/opt/rocm/lib/libhsa-runtime64.so
-ExecStart=%h/tei-rocm/venv/bin/python3 %h/Projects/bge-torch-tei/server.py
-
-# bge-torch-dgpu.service (R9700, port 8111)
-[Service]
-Environment=ROCR_VISIBLE_DEVICES=1
-Environment=BGE_PORT=8111
-ExecStart=%h/tei-rocm/venv/bin/python3 %h/Projects/bge-torch-tei/server.py
-```
-
-Device index (`ROCR_VISIBLE_DEVICES`) counts BOUND devices: with an unbound
-iGPU the R9700 enumerates as index 0.
-
-If a qwen LLM server shares the dGPU, add mutual exclusion:
+## Systemd
 
 ```ini
 [Unit]
-Conflicts=qwen-server.service
-After=qwen-server.service
+Description=bge-m3 embedder on GPU
+
+[Service]
+Environment=ROCR_VISIBLE_DEVICES=0
+Environment=BGE_PORT=8110
+Environment=LD_PRELOAD=/opt/rocm/lib/libhsa-runtime64.so  # gfx1151 only
+ExecStart=%h/bge-torch-tei/venv/bin/python3 %h/bge-torch-tei/server.py
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
 ```
 
-## Bench
-
-```bash
-python3 bench.py [device_index]
-```
-
-Real ~400-token chunks from the local arXiv corpus, bf16+SDPA, batches
-32/64/128.
-
-## Fleet deployment
-
-The embed-fanout proxy (ollama→TEI protocol bridge on :11434) takes these
-as `tei@host:port` backends. Current fleet pool: iGPU (:8110) + R9700
-(:8111) + lubuntu2's R9700 (:8111 on 192.168.1.78) = ~194 chunks/s burst.
+`ROCR_VISIBLE_DEVICES` counts **bound** devices. If one GPU failed to probe,
+the other shifts to index 0.
